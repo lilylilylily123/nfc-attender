@@ -1,6 +1,7 @@
 "use client";
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import { trpc } from "@/lib/trpc";
 
 interface AttendanceRecord {
   id: string;
@@ -31,9 +32,6 @@ interface Learner {
 
 export default function HistoryPage() {
   const router = useRouter();
-  const [records, setRecords] = useState<AttendanceRecord[]>([]);
-  const [learners, setLearners] = useState<Learner[]>([]);
-  const [loading, setLoading] = useState(true);
   const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split("T")[0]);
   const [selectedLearnerId, setSelectedLearnerId] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -49,54 +47,40 @@ export default function HistoryPage() {
     lunch_status: "",
   });
 
-  // Fetch learners for dropdown
-  useEffect(() => {
-    const fetchLearners = async () => {
-      try {
-        const res = await fetch("/api/learners?perPage=100");
-        if (res.ok) {
-          const data = await res.json();
-          setLearners(data.items || []);
-        }
-      } catch (err) {
-        console.error("Failed to fetch learners:", err);
-      }
-    };
-    fetchLearners();
-  }, []);
-
-  const fetchHistory = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams({ date: selectedDate, perPage: "100" });
-      if (selectedLearnerId) params.set("learnerId", selectedLearnerId);
-      const res = await fetch(`/api/attendance?${params.toString()}`);
-      if (res.ok) {
-        const data = await res.json();
-        setRecords(data.items || []);
-      } else {
-        setRecords([]);
-      }
-    } catch (err) {
-      console.error("Failed to fetch history:", err);
-      setRecords([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [selectedDate, selectedLearnerId]);
-
-  useEffect(() => {
-    fetchHistory();
-  }, [fetchHistory]);
+  // tRPC queries
+  const learnersQuery = trpc.learners.list.useQuery(
+    { perPage: 100 },
+    { staleTime: 60000 }
+  );
+  
+  const attendanceQuery = trpc.attendance.list.useQuery(
+    {
+      date: selectedDate,
+      learnerId: selectedLearnerId || undefined,
+      perPage: 100,
+    },
+    { staleTime: 5000 }
+  );
+  
+  // tRPC mutations
+  const updateMutation = trpc.attendance.update.useMutation();
+  const resetMutation = trpc.attendance.reset.useMutation();
+  
+  // Derived state
+  const learners = useMemo(() => learnersQuery.data?.items || [], [learnersQuery.data]);
+  const records = useMemo(() => (attendanceQuery.data?.items || []) as unknown as AttendanceRecord[], [attendanceQuery.data]);
+  const loading = attendanceQuery.isLoading;
 
   // Filter records by search query
-  const filteredRecords = records.filter((record) => {
-    if (!searchQuery.trim()) return true;
-    const name = record.expand?.learner?.name?.toLowerCase() || "";
-    const email = record.expand?.learner?.email?.toLowerCase() || "";
-    const query = searchQuery.toLowerCase();
-    return name.includes(query) || email.includes(query);
-  });
+  const filteredRecords = useMemo(() => {
+    return records.filter((record) => {
+      if (!searchQuery.trim()) return true;
+      const name = record.expand?.learner?.name?.toLowerCase() || "";
+      const email = record.expand?.learner?.email?.toLowerCase() || "";
+      const query = searchQuery.toLowerCase();
+      return name.includes(query) || email.includes(query);
+    });
+  }, [records, searchQuery]);
 
   const formatTime = (val: string | null) => {
     if (!val) return "—";
@@ -176,23 +160,20 @@ export default function HistoryPage() {
         updates.push({ field: "lunch_status", value: editForm.lunch_status });
       }
       
-      // Send updates with force=true to allow overwriting
+      // Send updates with force=true to allow overwriting using tRPC
       for (const update of updates) {
-        await fetch(`/api/attendance/${editingRecord.learner}/update`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            date: selectedDate,
-            field: update.field,
-            value: update.value,
-            timestamp: update.timestamp,
-            force: true,
-          }),
+        await updateMutation.mutateAsync({
+          learnerId: editingRecord.learner,
+          date: selectedDate,
+          field: update.field,
+          value: update.value,
+          timestamp: update.timestamp,
+          force: true,
         });
       }
       
       // Refresh and close editor
-      await fetchHistory();
+      await attendanceQuery.refetch();
       cancelEditing();
     } catch (err) {
       console.error("Failed to save:", err);
@@ -204,12 +185,11 @@ export default function HistoryPage() {
     if (!confirm(`Reset attendance for ${record.expand?.learner?.name || "this learner"}?`)) return;
     
     try {
-      await fetch(`/api/attendance/${record.learner}/reset`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date: selectedDate }),
+      await resetMutation.mutateAsync({
+        learnerId: record.learner,
+        date: selectedDate,
       });
-      await fetchHistory();
+      await attendanceQuery.refetch();
     } catch (err) {
       console.error("Failed to reset:", err);
       alert("Failed to reset record");
@@ -274,7 +254,7 @@ export default function HistoryPage() {
             </div>
 
             <button
-              onClick={fetchHistory}
+              onClick={() => attendanceQuery.refetch()}
               className="px-4 py-2 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600 cursor-pointer"
             >
               Refresh

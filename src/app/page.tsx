@@ -14,6 +14,7 @@ import { useNfcLearner } from "./hooks/useNfcLearner";
 import Account from "./components/Account";
 import CreateLearnerModal from "./components/CreateLearnerModal";
 import { LearnerCard } from "./components/LearnerCard";
+import { trpc } from "@/lib/trpc";
 
 // Note: useNfcLearner is called below after testTime state is defined
 
@@ -46,9 +47,6 @@ export default function AttendancePage() {
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [programFilter, setProgramFilter] = useState<string | "all">("all");
   const [students, setStudents] = useState<RecordModel[]>([]);
-  
-  // Attendance records keyed by learner ID
-  const [attendanceMap, setAttendanceMap] = useState<Record<string, any>>({});
   
   // Test mode: when enabled, can simulate different dates/times
   const [testMode, setTestMode] = useState<boolean>(false);
@@ -129,22 +127,43 @@ export default function AttendancePage() {
     return () => clearTimeout(timer);
   }, [search]);
   
-  // Fetch attendance records for the current view date
-  const fetchAttendance = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/attendance?date=${viewDate}&perPage=100`);
-      if (!res.ok) return;
-      const data = await res.json();
-      // Build map of learnerId -> attendance record
-      const map: Record<string, any> = {};
-      for (const record of data.items || []) {
-        map[record.learner] = record;
-      }
-      setAttendanceMap(map);
-    } catch (error) {
-      console.error("Error fetching attendance:", error);
+  // tRPC queries
+  const learnersQuery = trpc.learners.list.useQuery(
+    {
+      page,
+      perPage,
+      search: debouncedSearch.trim() || undefined,
+      program: programFilter !== "all" ? programFilter : undefined,
+    },
+    { staleTime: 5000 }
+  );
+
+  const attendanceQuery = trpc.attendance.list.useQuery(
+    { date: viewDate, perPage: 100 },
+    { staleTime: 5000 }
+  );
+  
+  // tRPC mutations
+  const updateMutation = trpc.attendance.update.useMutation();
+  const resetMutation = trpc.attendance.reset.useMutation();
+  
+  // Build attendance map from query
+  const attendanceMap = useMemo(() => {
+    const map: Record<string, any> = {};
+    for (const record of attendanceQuery.data?.items || []) {
+      map[record.learner] = record;
     }
-  }, [viewDate]);
+    return map;
+  }, [attendanceQuery.data?.items]);
+  
+  // Set students from query data
+  useEffect(() => {
+    if (learnersQuery.data) {
+      setStudents(learnersQuery.data.items || []);
+      setTotalItems(learnersQuery.data.totalItems || 0);
+      setTotalPages(learnersQuery.data.totalPages || 1);
+    }
+  }, [learnersQuery.data]);
   
   // Refresh attendance data after NFC scan completes
   useEffect(() => {
@@ -152,47 +171,22 @@ export default function AttendancePage() {
       console.log("[page] NFC scan completed, refreshing attendance data");
       // Small delay to ensure the backend has processed the check-in
       const timer = setTimeout(() => {
-        fetchAttendance();
+        attendanceQuery.refetch();
       }, 500);
       return () => clearTimeout(timer);
     }
-  }, [isLoading, learner, fetchAttendance]);
+  }, [isLoading, learner, attendanceQuery]);
   
+  // Subscribe to real-time changes via PocketBase
   useEffect(() => {
-    // fetchStudents will call our server-side API that proxies PocketBase
-    const fetchStudents = async () => {
-      try {
-        const params = new URLSearchParams();
-        params.set("page", String(page));
-        params.set("perPage", String(perPage));
-        if (debouncedSearch && debouncedSearch.trim().length > 0)
-          params.set("search", debouncedSearch.trim());
-        if (programFilter && programFilter !== "all")
-          params.set("program", programFilter as string);
-
-        const res = await fetch(`/api/learners?${params.toString()}`);
-        if (!res.ok) throw new Error(`fetch error ${res.status}`);
-        const data = await res.json();
-        setStudents(data.items || []);
-        setTotalItems(data.totalItems || 0);
-        setTotalPages(data.totalPages || 1);
-      } catch (error) {
-        console.error("Error fetching students:", error);
-      }
-    };
-
-    fetchStudents();
-    fetchAttendance();
-
-    // subscribe to changes and refresh page if something changes
     let unsubscribeLearners: (() => void) | undefined;
     let unsubscribeAttendance: (() => void) | undefined;
     (async () => {
       unsubscribeLearners = await pb.collection("learners").subscribe("*", () => {
-        fetchStudents();
+        learnersQuery.refetch();
       });
       unsubscribeAttendance = await pb.collection("attendance").subscribe("*", () => {
-        fetchAttendance();
+        attendanceQuery.refetch();
       });
     })();
 
@@ -200,7 +194,7 @@ export default function AttendancePage() {
       if (unsubscribeLearners) unsubscribeLearners();
       if (unsubscribeAttendance) unsubscribeAttendance();
     };
-  }, [page, perPage, debouncedSearch, programFilter, fetchAttendance]);
+  }, [learnersQuery, attendanceQuery]);
   
   // Merge learners with their attendance data for the current date
   const studentsWithAttendance = useMemo(() => {
@@ -219,7 +213,7 @@ export default function AttendancePage() {
     });
   }, [students, attendanceMap]);
 
-  // Update attendance field via API
+  // Update attendance field via tRPC mutation
   const updateAttendance = useCallback(
     async (
       learnerId: string,
@@ -227,51 +221,32 @@ export default function AttendancePage() {
       options?: { value?: string; timestamp?: string }
     ): Promise<{ wrote: boolean; value?: string; attendance?: any }> => {
       try {
-        const res = await fetch(`/api/attendance/${learnerId}/update`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ 
-            field, 
-            date: viewDate,
-            value: options?.value,
-            timestamp: options?.timestamp,
-          }),
+        const result = await updateMutation.mutateAsync({
+          learnerId,
+          field,
+          date: viewDate,
+          value: options?.value,
+          timestamp: options?.timestamp,
         });
-        const data = await res.json();
 
-        if (res.status === 409) {
-          return { wrote: false, value: data.existingValue, attendance: data.attendance };
+        if (result.status === "already_set") {
+          return { wrote: false, value: result.existingValue, attendance: result.attendance };
         }
 
-        if (!res.ok) {
-          console.error("[updateAttendance] server error", data);
-          return { wrote: false };
-        }
+        // Refetch attendance data to sync
+        attendanceQuery.refetch();
 
-        // Update local attendance map
-        if (data.attendance) {
-          setAttendanceMap((prev) => ({
-            ...prev,
-            [learnerId]: data.attendance,
-          }));
-        }
-
-        return { wrote: true, value: data.value, attendance: data.attendance };
+        return { wrote: true, value: result.value, attendance: result.attendance };
       } catch (err) {
-        console.error("[updateAttendance] request failed", err);
+        console.error("[updateAttendance] mutation failed", err);
         return { wrote: false };
       }
     },
-    [viewDate]
+    [viewDate, updateMutation, attendanceQuery]
   );
 
   const handleSetStatus = useCallback(
     async (id: string, status: string, field: "status" | "lunch_status" = "status") => {
-      // Optimistic update
-      setAttendanceMap((prev) => ({
-        ...prev,
-        [id]: { ...prev[id], [field]: status },
-      }));
       try {
         await updateAttendance(id, field, { value: status });
       } catch (err) {
@@ -357,29 +332,13 @@ export default function AttendancePage() {
   // Reset a learner's daily attendance (for testing)
   const handleReset = useCallback(async (id: string) => {
     try {
-      const res = await fetch(`/api/attendance/${id}/reset`, { 
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date: viewDate }),
-      });
-      const data = await res.json();
-      if (res.ok && data.attendance) {
-        setAttendanceMap((prev) => ({
-          ...prev,
-          [id]: data.attendance,
-        }));
-      } else if (data.status === "no_record") {
-        // No record to reset, clear from map
-        setAttendanceMap((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-      }
+      await resetMutation.mutateAsync({ learnerId: id, date: viewDate });
+      // Refetch attendance data to sync
+      attendanceQuery.refetch();
     } catch (err) {
       console.error("Reset failed", err);
     }
-  }, [viewDate]);
+  }, [viewDate, resetMutation, attendanceQuery]);
 
   // Client-side filter for instant feedback while typing (before debounce triggers server fetch)
   // Uses studentsWithAttendance which merges learners with their attendance data

@@ -58,20 +58,28 @@ jobs:
       - name: Generate and upload latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           VERSION=$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed 's/.*: *"\(.*\)".*/\1/')
-          SIG_FILE="${{ github.workspace }}/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/NFC Attender.app.tar.gz.sig"
 
-          if [ ! -f "$SIG_FILE" ]; then
-            echo "ERROR: Signature file not found at $SIG_FILE"
-            exit 1
+          # Find the sig file wherever it may be
+          SIG_FILE=$(find "${{ github.workspace }}/src-tauri/target" -name "*.app.tar.gz.sig" 2>/dev/null | head -1)
+
+          if [ -z "$SIG_FILE" ]; then
+            echo "Sig file not found in build output, signing manually..."
+            # Download the tar.gz from the release and sign it
+            gh release download "${{ github.ref_name }}" --pattern "*.app.tar.gz" --dir /tmp
+            TAR_FILE=$(ls /tmp/*.app.tar.gz | head -1)
+            pnpm tauri signer sign "$TAR_FILE"
+            SIG_FILE="${TAR_FILE}.sig"
           fi
 
           SIGNATURE=$(cat "$SIG_FILE")
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/NFC.Attender_aarch64.app.tar.gz"
 
-          cat > latest.json << EOF
+          cat > latest.json <<ENDJSON
           {
             "version": "${VERSION}",
             "pub_date": "${PUB_DATE}",
@@ -82,10 +90,7 @@ jobs:
               }
             }
           }
-          EOF
+          ENDJSON
 
-          # Pretty-print to verify
           cat latest.json
-
-          # Upload to the release
           gh release upload "${{ github.ref_name }}" latest.json --clobber

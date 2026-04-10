@@ -68,10 +68,9 @@ jobs:
 
           if [ -z "$SIG_FILE" ]; then
             echo "Sig file not found in build output, signing manually..."
-            # Download the tar.gz from the release and sign it
             gh release download "${{ github.ref_name }}" --pattern "*.app.tar.gz" --dir /tmp
             TAR_FILE=$(ls /tmp/*.app.tar.gz | head -1)
-            pnpm tauri signer sign --private-key "$TAURI_SIGNING_PRIVATE_KEY" --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$TAR_FILE"
+            TAURI_PRIVATE_KEY="$TAURI_SIGNING_PRIVATE_KEY" TAURI_KEY_PASSWORD="$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" pnpm tauri signer sign "$TAR_FILE"
             SIG_FILE="${TAR_FILE}.sig"
           fi
 

@@ -17,6 +17,9 @@ importers:
       '@tauri-apps/api':
         specifier: ^2.0.1
         version: 2.9.0
+      '@tauri-apps/plugin-process':
+        specifier: ^2.3.1
+        version: 2.3.1
       class-variance-authority:
         specifier: 0.7.1
         version: 0.7.1
@@ -852,6 +855,9 @@ packages:
     resolution: {integrity: sha512-aGzdVgxQW6WQ7e5nydPZ/30u8HvltHjO3Ytzf1wOxX1N5Yj2TsjKWRb/AWJlB95Huml3k3c/b6s0ijAvlSo9xw==}
     engines: {node: '>= 10'}
     hasBin: true
+
+  '@tauri-apps/plugin-process@2.3.1':
+    resolution: {integrity: sha512-nCa4fGVaDL/B9ai03VyPOjfAHRHSBz5v6F/ObsB73r/dA3MHHhZtldaDMIc0V/pnUw9ehzr2iEG+XkSEyC0JJA==}
 
   '@testing-library/dom@10.4.1':
     resolution: {integrity: sha512-o4PXJQidqJl82ckFaXUeoAW+XysPLauYI43Abki5hABd853iMhitooc6znOnczgbTYmEP6U6/y1ZyKAIsvMKGg==}
@@ -3365,6 +3371,10 @@ snapshots:
       '@tauri-apps/cli-win32-arm64-msvc': 2.9.2
       '@tauri-apps/cli-win32-ia32-msvc': 2.9.2
       '@tauri-apps/cli-win32-x64-msvc': 2.9.2
+
+  '@tauri-apps/plugin-process@2.3.1':
+    dependencies:
+      '@tauri-apps/api': 2.9.0
 
   '@testing-library/dom@10.4.1':
     dependencies:

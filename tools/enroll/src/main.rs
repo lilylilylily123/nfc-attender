@@ -62,9 +62,7 @@ fn wait_for_card() -> Result<String, String> {
 #[derive(Serialize)]
 struct CreateLearnerBody {
     name: String,
-    email: String,
     program: String,
-    dob: String,
     #[serde(rename = "NFC_ID")]
     nfc_id: String,
 }
@@ -270,16 +268,12 @@ async fn main() {
             println!("Name cannot be empty, skipping.");
             continue;
         }
-        let email_input = prompt("Learner email: ");
-        let dob = prompt("Date of birth (YYYY-MM-DD): ");
         println!("Program:");
         let program = prompt_program();
 
         // Confirm
         println!();
         println!("  Name:    {name}");
-        println!("  Email:   {email_input}");
-        println!("  DOB:     {dob}");
         println!("  Program: {program}");
         println!("  NFC UID: {uid}");
         let confirm = prompt("Create this learner? [Y/n]: ");
@@ -292,9 +286,7 @@ async fn main() {
         // Create in PocketBase
         let body = CreateLearnerBody {
             name,
-            email: email_input,
             program,
-            dob,
             nfc_id: uid,
         };
 

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { relaunch } from '@tauri-apps/plugin-process';
 
 interface UpdateInfo {
   current: string;
@@ -10,24 +11,26 @@ interface UpdateInfo {
 }
 
 export function UpdateNotification() {
-  const [updateAvailable, setUpdateAvailable] = useState<UpdateInfo | null>(null);
-  const [isInstalling, setIsInstalling] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [ready, setReady] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
-    // Listen for update events from Rust backend
-    const unlisten = listen<UpdateInfo>('update-available', (event) => {
-      console.log('Update available:', event.payload);
-      setUpdateAvailable(event.payload);
+    const unlistenAvailable = listen<UpdateInfo>('update-available', (event) => {
+      setUpdateInfo(event.payload);
+    });
+
+    const unlistenReady = listen('update-ready', () => {
+      setReady(true);
     });
 
     return () => {
-      unlisten.then((fn) => fn());
+      unlistenAvailable.then((fn) => fn());
+      unlistenReady.then((fn) => fn());
     };
   }, []);
 
-  if (!updateAvailable) {
-    return null;
-  }
+  if (!updateInfo || dismissed) return null;
 
   return (
     <div className="fixed top-4 right-4 z-50 max-w-md">
@@ -53,46 +56,38 @@ export function UpdateNotification() {
               Update Available
             </h3>
             <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">
-              Version {updateAvailable.latest} is now available
-              <span className="text-gray-400"> (current: {updateAvailable.current})</span>
+              Version {updateInfo.latest} is now available
+              <span className="text-gray-400"> (current: {updateInfo.current})</span>
             </p>
-            {updateAvailable.notes && (
+            {updateInfo.notes && (
               <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                {updateAvailable.notes}
+                {updateInfo.notes}
               </p>
             )}
           </div>
         </div>
-        
-        {isInstalling ? (
-          <div className="mt-3">
-            <div className="flex items-center gap-2">
-              <div className="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full" />
-              <span className="text-sm text-gray-600 dark:text-gray-300">
-                Installing update...
-              </span>
-            </div>
-          </div>
-        ) : (
-          <div className="mt-3 flex gap-2">
+
+        <div className="mt-3 flex gap-2">
+          {ready ? (
             <button
-              onClick={() => {
-                setIsInstalling(true);
-                // The update is already being installed automatically
-                // This just shows the UI feedback
-              }}
+              onClick={() => relaunch()}
               className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors"
             >
-              Restart to Update
+              Restart Now
             </button>
-            <button
-              onClick={() => setUpdateAvailable(null)}
-              className="px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
+          ) : (
+            <span className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
+              <span className="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full" />
+              Downloading...
+            </span>
+          )}
+          <button
+            onClick={() => setDismissed(true)}
+            className="px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors"
+          >
+            Dismiss
+          </button>
+        </div>
       </div>
     </div>
   );

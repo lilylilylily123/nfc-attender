@@ -13,6 +13,7 @@ import Account from "./components/Account";
 import CreateLearnerModal from "./components/CreateLearnerModal";
 import { LearnerCard } from "./components/LearnerCard";
 import * as pbClient from "@/lib/pb-client";
+import { UpdateNotification } from "./components/UpdateNotification";
 
 // Note: useNfcLearner is called below after testTime state is defined
 
@@ -579,6 +580,7 @@ export default function AttendancePage() {
 
   return (
     <div className="min-h-screen bg-yellow-50 p-4 sm:p-6 font-sans">
+      <UpdateNotification />
       <div className="w-full max-w-7xl mx-auto">
         {/* Header Row */}
         <div className="flex items-center justify-between mb-4">

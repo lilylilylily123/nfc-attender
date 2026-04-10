@@ -215,27 +215,15 @@ export async function updateAttendance(params: UpdateAttendanceParams): Promise<
     throw new Error(`Invalid status value. Allowed: ${ALLOWED_STATUSES.join(", ")}`);
   }
 
-  // Verify learner exists
-  try {
-    await pb.collection("learners").getOne(learnerId);
-  } catch {
-    throw new Error(`Learner not found: ${learnerId}`);
-  }
-
-  // Get or create attendance record
+  // Get or create attendance record for this specific date
   let attendance: AttendanceRecord;
-  const allForLearner = await pb.collection("attendance").getFullList({
-    filter: `learner = "${learnerId}"`,
-  });
-
-  const existing = allForLearner.find((r: any) => {
-    const recordDate = r.date?.split?.(" ")?.[0] || r.date?.split?.("T")?.[0] || r.date;
-    return recordDate === date;
-  });
-
-  if (existing) {
+  try {
+    const existing = await pb.collection("attendance").getFirstListItem(
+      `learner = "${learnerId}" && date ~ "${date}"`
+    );
     attendance = existing as unknown as AttendanceRecord;
-  } else {
+  } catch {
+    // No record for this date — create one
     const created = await pb.collection("attendance").create({
       learner: learnerId,
       date: date,

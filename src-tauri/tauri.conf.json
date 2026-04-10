@@ -32,7 +32,7 @@
       "endpoints": [
         "https://github.com/lilylilylily123/nfc-attender/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU1Rjg1QjA3ODUxNThEMUQKUldRZGpSV0ZCMXY0NVdLbWx1WWZaOVdwS1cxTGtoMEhnUXlPM3hTb1FJNnFHbFJ6aHJ2SEtqUngK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMwRTRGNTQ5RTkxRUY0QTIKUldTaTlCN3BTZlhrTU1MM1VFQ0l2RHAzeXRGMnFqWkhmOTcyZkpRUUVUWjlMUFR4UmNDSHlTeVkK"
     }
   },
   "bundle": {

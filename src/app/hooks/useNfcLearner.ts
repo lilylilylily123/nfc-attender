@@ -1,7 +1,6 @@
 "use client";
 import { useEffect, useState, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { pb } from "../pb";
 import { getLearnerByNfc, checkLearnerIn } from "../utils/utils";
 
 interface NfcHookOptions {
@@ -14,7 +13,10 @@ export function useNfcLearner(options?: NfcHookOptions) {
   const [learner, setLearner] = useState<any>(null);
   const [exists, setExists] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState(false);
-  
+
+  // Processing lock to prevent parallel scan handling
+  const processingRef = useRef(false);
+
   // Use ref to always have latest options in event listener
   const optionsRef = useRef<NfcHookOptions | undefined>(options);
   
@@ -33,8 +35,15 @@ export function useNfcLearner(options?: NfcHookOptions) {
     (async () => {
       unlisten = await listen<string>("nfc-scanned", async (event) => {
         const scannedUid = event.payload;
+
+        // Skip if already processing a scan
+        if (processingRef.current) {
+          console.log(`[useNfcLearner] Skipping scan (busy): ${scannedUid}`);
+          return;
+        }
+        processingRef.current = true;
         setIsLoading(true);
-        
+
         // Get current options from ref
         const currentOptions = optionsRef.current;
         console.log(`[useNfcLearner] NFC scanned: ${scannedUid}`);
@@ -47,7 +56,7 @@ export function useNfcLearner(options?: NfcHookOptions) {
           // Single DB query instead of 3 separate ones
           const data = await getLearnerByNfc(scannedUid);
           const learnerExists = !!data;
-          
+
           setExists(learnerExists);
           setLearner(data);
           setUid(scannedUid);
@@ -62,6 +71,7 @@ export function useNfcLearner(options?: NfcHookOptions) {
         } catch (err) {
           console.error("NFC handling error:", err);
         } finally {
+          processingRef.current = false;
           setIsLoading(false);
         }
       });

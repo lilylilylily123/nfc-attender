@@ -13,25 +13,6 @@ export async function getLearnerByNfc(uid: string) {
   }
 }
 
-export async function uidTF(uid: string): Promise<boolean> {
-  try {
-    await pb.collection("learners").getFirstListItem(`NFC_ID = '${uid}'`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export async function checkIfLearnerExist(uid: string) {
-  try {
-    return await pb
-      .collection("learners")
-      .getFirstListItem(`NFC_ID = '${uid}'`);
-  } catch {
-    console.log("No learner found");
-    return null;
-  }
-}
 export async function createLearner(
   name: string,
   email: string,

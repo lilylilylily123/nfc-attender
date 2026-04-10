@@ -4,10 +4,8 @@ import { useRouter } from "next/navigation";
 import { pb } from "./pb";
 import { RecordModel } from "pocketbase";
 import {
-  checkIfLearnerExist,
   checkLearnerIn,
   createLearner,
-  uidTF,
 } from "./utils/utils";
 import { listen } from "@tauri-apps/api/event";
 import { useNfcLearner } from "./hooks/useNfcLearner";
@@ -198,8 +196,12 @@ export default function AttendancePage() {
   }, [isLoading, learner, fetchAttendance, isLoggedIn]);
 
   // Subscribe to real-time changes via PocketBase - only when logged in
+  // Debounce refetches so rapid changes (morning rush) batch into single calls
   useEffect(() => {
     if (!isLoggedIn) return;
+
+    let learnersTimer: ReturnType<typeof setTimeout> | null = null;
+    let attendanceTimer: ReturnType<typeof setTimeout> | null = null;
 
     let unsubscribeLearners: (() => void) | undefined;
     let unsubscribeAttendance: (() => void) | undefined;
@@ -207,16 +209,20 @@ export default function AttendancePage() {
       unsubscribeLearners = await pb
         .collection("learners")
         .subscribe("*", () => {
-          fetchLearners();
+          if (learnersTimer) clearTimeout(learnersTimer);
+          learnersTimer = setTimeout(fetchLearners, 500);
         });
       unsubscribeAttendance = await pb
         .collection("attendance")
         .subscribe("*", () => {
-          fetchAttendance();
+          if (attendanceTimer) clearTimeout(attendanceTimer);
+          attendanceTimer = setTimeout(fetchAttendance, 500);
         });
     })();
 
     return () => {
+      if (learnersTimer) clearTimeout(learnersTimer);
+      if (attendanceTimer) clearTimeout(attendanceTimer);
       if (unsubscribeLearners) unsubscribeLearners();
       if (unsubscribeAttendance) unsubscribeAttendance();
     };

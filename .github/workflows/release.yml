@@ -51,6 +51,6 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'NFC Attender ${{ github.ref_name }}'
           releaseBody: 'See the assets to download the app and install.'
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: '--target aarch64-apple-darwin'

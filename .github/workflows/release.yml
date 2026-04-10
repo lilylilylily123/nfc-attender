@@ -60,7 +60,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed 's/.*: *"\(.*\)".*/\1/')
-          SIG_FILE="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/NFC Attender.app.tar.gz.sig"
+          SIG_FILE="${{ github.workspace }}/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/NFC Attender.app.tar.gz.sig"
 
           if [ ! -f "$SIG_FILE" ]; then
             echo "ERROR: Signature file not found at $SIG_FILE"

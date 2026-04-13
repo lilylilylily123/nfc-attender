@@ -1,36 +1,81 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { useEffect, useState, useRef } from 'react';
+import { check, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 
-interface UpdateInfo {
-  current: string;
-  latest: string;
-  notes?: string;
-}
+type Phase =
+  | { status: 'idle' }
+  | { status: 'available'; update: Update }
+  | { status: 'downloading'; progress: number }
+  | { status: 'ready' }
+  | { status: 'error'; message: string };
 
 export function UpdateNotification() {
-  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
-  const [ready, setReady] = useState(false);
+  const [phase, setPhase] = useState<Phase>({ status: 'idle' });
   const [dismissed, setDismissed] = useState(false);
+  const downloadedRef = useRef(0);
 
   useEffect(() => {
-    const unlistenAvailable = listen<UpdateInfo>('update-available', (event) => {
-      setUpdateInfo(event.payload);
-    });
+    let cancelled = false;
 
-    const unlistenReady = listen('update-ready', () => {
-      setReady(true);
-    });
+    check()
+      .then((update) => {
+        if (cancelled || !update) return;
+        setPhase({ status: 'available', update });
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.error('Update check failed:', err);
+        }
+      });
 
     return () => {
-      unlistenAvailable.then((fn) => fn());
-      unlistenReady.then((fn) => fn());
+      cancelled = true;
     };
   }, []);
 
-  if (!updateInfo || dismissed) return null;
+  async function handleUpdate() {
+    if (phase.status !== 'available') return;
+    const { update } = phase;
+
+    downloadedRef.current = 0;
+    setPhase({ status: 'downloading', progress: 0 });
+
+    try {
+      let contentLength = 0;
+
+      await update.downloadAndInstall((event) => {
+        switch (event.event) {
+          case 'Started':
+            contentLength = event.data.contentLength ?? 0;
+            break;
+          case 'Progress':
+            downloadedRef.current += event.data.chunkLength;
+            if (contentLength > 0) {
+              setPhase({
+                status: 'downloading',
+                progress: Math.round(
+                  (downloadedRef.current / contentLength) * 100
+                ),
+              });
+            }
+            break;
+          case 'Finished':
+            break;
+        }
+      });
+
+      setPhase({ status: 'ready' });
+    } catch (err) {
+      setPhase({
+        status: 'error',
+        message: err instanceof Error ? err.message : 'Download failed',
+      });
+    }
+  }
+
+  if (phase.status === 'idle' || dismissed) return null;
 
   return (
     <div className="fixed top-4 right-4 z-50 max-w-md">
@@ -52,41 +97,92 @@ export function UpdateNotification() {
             </svg>
           </div>
           <div className="flex-1">
-            <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
-              Update Available
-            </h3>
-            <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">
-              Version {updateInfo.latest} is now available
-              <span className="text-gray-400"> (current: {updateInfo.current})</span>
-            </p>
-            {updateInfo.notes && (
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                {updateInfo.notes}
-              </p>
+            {phase.status === 'available' && (
+              <>
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
+                  Update Available
+                </h3>
+                <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">
+                  Version {phase.update.version} is ready to install
+                </p>
+                {phase.update.body && (
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                    {phase.update.body}
+                  </p>
+                )}
+              </>
+            )}
+
+            {phase.status === 'downloading' && (
+              <>
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
+                  Downloading Update...
+                </h3>
+                <div className="mt-2 w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                  <div
+                    className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${phase.progress}%` }}
+                  />
+                </div>
+                {phase.progress > 0 && (
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    {phase.progress}%
+                  </p>
+                )}
+              </>
+            )}
+
+            {phase.status === 'ready' && (
+              <>
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
+                  Update Ready
+                </h3>
+                <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">
+                  Restart to apply the update.
+                </p>
+              </>
+            )}
+
+            {phase.status === 'error' && (
+              <>
+                <h3 className="text-sm font-semibold text-red-600 dark:text-red-400">
+                  Update Failed
+                </h3>
+                <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">
+                  {phase.message}
+                </p>
+              </>
             )}
           </div>
         </div>
 
         <div className="mt-3 flex gap-2">
-          {ready ? (
+          {phase.status === 'available' && (
+            <button
+              onClick={handleUpdate}
+              className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors"
+            >
+              Update Now
+            </button>
+          )}
+
+          {phase.status === 'ready' && (
             <button
               onClick={() => relaunch()}
               className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors"
             >
               Restart Now
             </button>
-          ) : (
-            <span className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
-              <span className="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full" />
-              Downloading...
-            </span>
           )}
-          <button
-            onClick={() => setDismissed(true)}
-            className="px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors"
-          >
-            Dismiss
-          </button>
+
+          {phase.status !== 'downloading' && (
+            <button
+              onClick={() => setDismissed(true)}
+              className="px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors"
+            >
+              Dismiss
+            </button>
+          )}
         </div>
       </div>
     </div>

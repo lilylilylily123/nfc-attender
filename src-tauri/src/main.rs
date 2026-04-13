@@ -5,7 +5,6 @@
 use hex;
 use pcsc::*;
 use tauri::{Emitter, Manager, WebviewWindow};
-use tauri_plugin_updater::UpdaterExt;
 
 // Function to get UID from the card
 fn get_uid(card: &Card) -> Option<String> {
@@ -115,62 +114,6 @@ fn main() {
                 .expect("failed to get main window");
 
             start_nfc_listener(window)?;
-
-            // Check for updates on startup
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let updater = match handle.updater() {
-                    Ok(u) => u,
-                    Err(e) => {
-                        eprintln!("Failed to get updater: {e}");
-                        return;
-                    }
-                };
-
-                let update = match updater.check().await {
-                    Ok(Some(u)) => u,
-                    Ok(None) => {
-                        println!("No updates available");
-                        return;
-                    }
-                    Err(e) => {
-                        eprintln!("Update check failed: {e}");
-                        return;
-                    }
-                };
-
-                println!(
-                    "Update available: {} -> {}",
-                    update.current_version, update.version
-                );
-
-                // Notify frontend
-                let _ = handle.emit(
-                    "update-available",
-                    serde_json::json!({
-                        "current": update.current_version.to_string(),
-                        "latest": update.version,
-                        "notes": update.body,
-                    }),
-                );
-
-                // Download and install in background
-                match update
-                    .download_and_install(
-                        |_chunk, _total| {},
-                        || println!("Download finished, installing..."),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        println!("Update installed — waiting for user to restart");
-                        let _ = handle.emit("update-ready", ());
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to download/install update: {e}");
-                    }
-                }
-            });
 
             Ok(())
         })

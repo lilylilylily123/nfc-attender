@@ -8,6 +8,7 @@ import {
   createLearner,
 } from "./utils/utils";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { useNfcLearner } from "./hooks/useNfcLearner";
 import Account from "./components/Account";
 import CreateLearnerModal from "./components/CreateLearnerModal";
@@ -99,6 +100,9 @@ export default function AttendancePage() {
   const [editingTimeKey, setEditingTimeKey] = useState<string | null>(null); // "learnerId:field"
   const [timeEditValue, setTimeEditValue] = useState<string>("");
 
+  // App version from Tauri
+  const [appVersion, setAppVersion] = useState<string>("");
+
   // Preset times for quick testing
   const testTimePresets = [
     { label: "9 AM", hour: 9 },
@@ -132,6 +136,8 @@ export default function AttendancePage() {
     const unsubscribe = pb.authStore.onChange(() => {
       setIsLoggedIn(pb.authStore.isValid);
     });
+
+    getVersion().then(setAppVersion).catch(() => {});
 
     return () => unsubscribe();
   }, []);
@@ -675,9 +681,14 @@ export default function AttendancePage() {
       <div className="w-full max-w-7xl mx-auto">
         {/* Header Row */}
         <div className="flex items-center justify-between mb-4">
-          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">
-            Attender
-          </h1>
+          <div className="flex items-baseline gap-2">
+            <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">
+              Attender
+            </h1>
+            {appVersion && (
+              <span className="text-xs text-gray-400 font-normal">v{appVersion}</span>
+            )}
+          </div>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowModal(true)}

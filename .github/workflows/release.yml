@@ -52,22 +52,3 @@ jobs:
           releaseDraft: false
           prerelease: false
 
-      - name: Upload updater JSON
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION=$(grep '"version"' "$GITHUB_WORKSPACE/src-tauri/tauri.conf.json" | head -1 | sed 's/.*: *"\(.*\)".*/\1/')
-          SIGNATURE=$(cat "$GITHUB_WORKSPACE/src-tauri/target/release/bundle/macos/NFC Attender.app.tar.gz.sig")
-          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/NFC.Attender_aarch64.app.tar.gz"
-
-          jq -n \
-            --arg version "$VERSION" \
-            --arg pub_date "$PUB_DATE" \
-            --arg signature "$SIGNATURE" \
-            --arg url "$URL" \
-            '{version: $version, pub_date: $pub_date, platforms: {"darwin-aarch64": {signature: $signature, url: $url}}}' \
-            > latest.json
-
-          cat latest.json
-          gh release upload "${{ github.ref_name }}" latest.json --clobber

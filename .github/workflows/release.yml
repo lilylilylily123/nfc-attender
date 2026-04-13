@@ -10,7 +10,15 @@ jobs:
   release:
     permissions:
       contents: write
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: ''
+          - platform: windows-latest
+            args: ''
+    runs-on: ${{ matrix.platform }}
 
     steps:
       - name: Checkout repository
@@ -51,4 +59,3 @@ jobs:
           releaseBody: 'See the assets to download the app and install.'
           releaseDraft: false
           prerelease: false
-

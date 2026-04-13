@@ -211,7 +211,7 @@ export async function updateAttendance(params: UpdateAttendanceParams): Promise<
     throw new Error(`Invalid field. Allowed: ${[...TIMESTAMP_FIELDS, ...STATUS_FIELDS, ...JSON_FIELDS].join(", ")}`);
   }
 
-  if (isStatusField && value && !ALLOWED_STATUSES.includes(value as any)) {
+  if (isStatusField && value && value !== "" && !ALLOWED_STATUSES.includes(value as any)) {
     throw new Error(`Invalid status value. Allowed: ${ALLOWED_STATUSES.join(", ")}`);
   }
 
@@ -265,6 +265,50 @@ export async function updateAttendance(params: UpdateAttendanceParams): Promise<
     value: updateValue,
     attendance: updated as unknown as AttendanceRecord,
   };
+}
+
+// Batch update: get-or-create attendance record once, then set multiple fields in one update.
+// Returns the record state BEFORE the update (for callers that need to check existing values)
+// plus the updated record. If fields is empty, just returns the existing/created record.
+export async function batchUpdateAttendance(params: {
+  learnerId: string;
+  date?: string;
+  fields?: Record<string, string>;
+}): Promise<{ attendance: AttendanceRecord; existing: AttendanceRecord; created: boolean }> {
+  const { learnerId, fields } = params;
+  const date = params.date || new Date().toISOString().split("T")[0];
+  const pb = getPb();
+
+  // Step 1: Get or create attendance record (1-2 requests)
+  let attendance: AttendanceRecord;
+  let created = false;
+  try {
+    const existing = await pb.collection("attendance").getFirstListItem(
+      `learner = "${learnerId}" && date ~ "${date}"`
+    );
+    attendance = existing as unknown as AttendanceRecord;
+  } catch {
+    const record = await pb.collection("attendance").create({
+      learner: learnerId,
+      date: date,
+    });
+    attendance = record as unknown as AttendanceRecord;
+    created = true;
+  }
+
+  // Snapshot the state before update so callers can check existing values
+  const existing = { ...attendance };
+
+  // Step 2: Single update with all fields (1 request)
+  if (fields && Object.keys(fields).length > 0) {
+    const updated = await pb.collection("attendance").update(
+      attendance.id,
+      fields
+    );
+    attendance = updated as unknown as AttendanceRecord;
+  }
+
+  return { attendance, existing, created };
 }
 
 export interface ResetAttendanceResult {

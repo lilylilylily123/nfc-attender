@@ -192,17 +192,16 @@ export default function HistoryPage() {
         updates.push({ field: "lunch_status", value: editForm.lunch_status });
       }
       
-      // Send updates with force=true to allow overwriting
+      // Batch all field updates into a single PocketBase call
+      const fields: Record<string, string> = {};
       for (const update of updates) {
-        await pbClient.updateAttendance({
-          learnerId: editingRecord.learner,
-          date: selectedDate,
-          field: update.field,
-          value: update.value,
-          timestamp: update.timestamp,
-          force: true,
-        });
+        fields[update.field] = update.timestamp || update.value || "";
       }
+      await pbClient.batchUpdateAttendance({
+        learnerId: editingRecord.learner,
+        date: selectedDate,
+        fields,
+      });
       
       // Refresh and close editor
       await fetchAttendance();

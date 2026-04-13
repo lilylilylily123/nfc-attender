@@ -63,162 +63,123 @@ export async function getAttendanceForDate(
 interface CheckInOptions {
   testTime?: Date | null; // Simulated time
   testDate?: string | null; // Simulated date (YYYY-MM-DD)
+  learnerData?: any; // Pre-fetched learner record to avoid redundant DB query
+}
+
+// Retry helper for 429 rate limit errors
+async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 800): Promise<T> {
+  try {
+    return await fn();
+  } catch (err: any) {
+    if (retries > 0 && err?.status === 429) {
+      console.log(`[withRetry] 429 rate limited, retrying in ${delay}ms (${retries} left)...`);
+      await new Promise(r => setTimeout(r, delay));
+      return withRetry(fn, retries - 1, delay * 1.5);
+    }
+    throw err;
+  }
 }
 
 export async function checkLearnerIn(NFC_ID: string, options?: CheckInOptions) {
-  // First, get the learner
-  const learner = await getLearnerByNfc(NFC_ID);
+  // Use pre-fetched learner if available, otherwise look up
+  const learner = options?.learnerData || await getLearnerByNfc(NFC_ID);
 
   if (!learner) {
     console.log("Learner not found");
     return;
   }
 
-  // Use testTime if provided, otherwise use real time
   const now = options?.testTime || new Date();
   const hour = now.getHours();
-
-  // Use testDate if provided, otherwise use the date from now
   const dateStr = options?.testDate || now.toISOString().split("T")[0];
 
   console.log(
-    `[checkLearnerIn] Using time: ${now.toLocaleTimeString()}, date: ${dateStr} (test mode: ${!!(options?.testTime || options?.testDate)})`,
+    `[checkLearnerIn] ${learner.name} - time: ${now.toLocaleTimeString()}, date: ${dateStr}`,
   );
 
-  // Get current attendance state for this date
-  const attendance = await getAttendanceForDate(learner.id, dateStr);
-  const time_in = attendance?.time_in;
-  const time_out = attendance?.time_out;
-  const lunch_events = (attendance?.lunch_events || []) as Array<{type: 'out' | 'in', time: string}>;
+  // Single call: get-or-create attendance record AND read existing state (1-2 requests)
+  // No separate getAttendanceForDate needed — batchUpdateAttendance returns existing values
+  const { existing } = await withRetry(() => pbClient.batchUpdateAttendance({
+    learnerId: learner.id,
+    date: dateStr,
+  }));
 
-  // Step 1: Morning check-in (if not checked in yet)
+  const time_in = (existing as any).time_in;
+  const time_out = (existing as any).time_out;
+  const lunch_events = ((existing as any).lunch_events || []) as Array<{type: 'out' | 'in', time: string}>;
+
+  // Step 1: Morning check-in — batch time_in + status in ONE update (1 request)
   if (!time_in) {
     try {
-      const result = await pbClient.updateAttendance({
-        learnerId: learner.id,
-        field: "time_in",
-        timestamp: now.toISOString(),
-        date: dateStr,
-      });
-      if (result.status === "updated") {
-        // Before 10:01 AM = present, 10:01 AM+ = late
-        const lateTime = new Date(
-          now.getFullYear(),
-          now.getMonth(),
-          now.getDate(),
-          10,
-          1,
-          0,
-          0,
-        );
-        const isLate = now.getTime() >= lateTime.getTime();
-        const status = isLate ? "late" : "present";
-        await pbClient.updateAttendance({
-          learnerId: learner.id,
-          field: "status",
-          value: status,
-          date: dateStr,
-        });
-        console.log(`Learner checked in (${status})`);
-      }
+      const lateTime = new Date(
+        now.getFullYear(), now.getMonth(), now.getDate(), 10, 1, 0, 0,
+      );
+      const status = now.getTime() >= lateTime.getTime() ? "late" : "present";
+
+      await withRetry(() => pb.collection("attendance").update(
+        existing.id,
+        { time_in: now.toISOString(), status },
+      ));
+      console.log(`[checkLearnerIn] ${learner.name} checked in (${status})`);
     } catch (err) {
-      console.error("Failed to check in:", err);
+      console.error(`[checkLearnerIn] Failed to check in ${learner.name}:`, err);
     }
     return;
   }
 
   // Step 2 & 3: Multiple lunch out/in (1pm-2pm window)
   if (hour >= 13 && hour < 14) {
-    // Determine if we should check out or check in
     const lastEvent = lunch_events.length > 0 ? lunch_events[lunch_events.length - 1] : null;
-    
-    // If no events or last event was 'in', next action is 'out'
-    // If last event was 'out', next action is 'in'
     const nextEventType: 'out' | 'in' = !lastEvent || lastEvent.type === 'in' ? 'out' : 'in';
-    
-    const newEvent = {
-      type: nextEventType,
-      time: now.toISOString()
-    };
-    
-    const updatedEvents = [...lunch_events, newEvent];
-    
+
+    const updatedEvents = [...lunch_events, { type: nextEventType, time: now.toISOString() }];
+
     try {
-      await pbClient.updateAttendance({
-        learnerId: learner.id,
-        field: "lunch_events",
-        value: JSON.stringify(updatedEvents),
-        date: dateStr,
-        force: true,
-      });
-      
-      // If checking in from lunch and it's after 2:01pm, mark as late
+      const fields: Record<string, string> = {
+        lunch_events: JSON.stringify(updatedEvents),
+      };
+
       if (nextEventType === 'in') {
         const lunchLateTime = new Date(
-          now.getFullYear(),
-          now.getMonth(),
-          now.getDate(),
-          14,
-          1,
-          0,
-          0,
+          now.getFullYear(), now.getMonth(), now.getDate(), 14, 1, 0, 0,
         );
-        const isLunchLate = now.getTime() >= lunchLateTime.getTime();
-        const lunchStatus = isLunchLate ? "late" : "present";
-        await pbClient.updateAttendance({
-          learnerId: learner.id,
-          field: "lunch_status",
-          value: lunchStatus,
-          date: dateStr,
-        });
-        console.log(`Learner back from lunch #${Math.ceil(updatedEvents.length / 2)} (${lunchStatus})`);
+        fields.lunch_status = now.getTime() >= lunchLateTime.getTime() ? "late" : "present";
+        console.log(`[checkLearnerIn] ${learner.name} back from lunch #${Math.ceil(updatedEvents.length / 2)} (${fields.lunch_status})`);
       } else {
-        console.log(`Learner checked out for lunch #${Math.ceil(updatedEvents.length / 2)}`);
+        console.log(`[checkLearnerIn] ${learner.name} out for lunch #${Math.ceil(updatedEvents.length / 2)}`);
       }
+
+      await withRetry(() => pb.collection("attendance").update(
+        existing.id,
+        fields,
+      ));
     } catch (err) {
-      console.error("Failed to update lunch event:", err);
+      console.error(`[checkLearnerIn] Failed to update lunch for ${learner.name}:`, err);
     }
     return;
   }
 
-  // Step 4: After 2pm, use traditional lunch_in/lunch_out for late returns
-  const lunch_out_legacy = attendance?.lunch_out;
-  const lunch_in_legacy = attendance?.lunch_in;
-  
-  // If still at lunch after 2pm, allow checking back in
+  // Step 4: After 2pm, late lunch return
   if (hour >= 14) {
-    // Check if currently at lunch (last event was 'out' OR using legacy lunch_out without lunch_in)
     const currentlyAtLunch = lunch_events.length > 0 && lunch_events[lunch_events.length - 1].type === 'out';
+    const lunch_out_legacy = (existing as any).lunch_out;
+    const lunch_in_legacy = (existing as any).lunch_in;
     const currentlyAtLunchLegacy = lunch_out_legacy && !lunch_in_legacy;
-    
+
     if (currentlyAtLunch || currentlyAtLunchLegacy) {
-      // Allow check in
-      const newEvent = {
-        type: 'in' as const,
-        time: now.toISOString()
-      };
-      
-      const updatedEvents = [...lunch_events, newEvent];
-      
+      const updatedEvents = [...lunch_events, { type: 'in' as const, time: now.toISOString() }];
+
       try {
-        await pbClient.updateAttendance({
-          learnerId: learner.id,
-          field: "lunch_events",
-          value: JSON.stringify(updatedEvents),
-          date: dateStr,
-          force: true,
-        });
-        
-        // Mark as late for returning after 2pm
-        await pbClient.updateAttendance({
-          learnerId: learner.id,
-          field: "lunch_status",
-          value: "late",
-          date: dateStr,
-        });
-        console.log(`Learner back from lunch (late - after 2pm)`);
+        await withRetry(() => pb.collection("attendance").update(
+          existing.id,
+          {
+            lunch_events: JSON.stringify(updatedEvents),
+            lunch_status: "late",
+          },
+        ));
+        console.log(`[checkLearnerIn] ${learner.name} back from lunch (late - after 2pm)`);
       } catch (err) {
-        console.error("Failed to update lunch_in:", err);
+        console.error(`[checkLearnerIn] Failed to update lunch_in for ${learner.name}:`, err);
       }
       return;
     }
@@ -228,19 +189,16 @@ export async function checkLearnerIn(NFC_ID: string, options?: CheckInOptions) {
   const minute = now.getMinutes();
   if ((hour > 16 || (hour === 16 && minute >= 59)) && !time_out) {
     try {
-      await pbClient.updateAttendance({
-        learnerId: learner.id,
-        field: "time_out",
-        timestamp: now.toISOString(),
-        date: dateStr,
-      });
-      console.log("Learner checked out for the day");
+      await withRetry(() => pb.collection("attendance").update(
+        existing.id,
+        { time_out: now.toISOString() },
+      ));
+      console.log(`[checkLearnerIn] ${learner.name} checked out for the day`);
     } catch (err) {
-      console.error("Failed to check out:", err);
+      console.error(`[checkLearnerIn] Failed to check out ${learner.name}:`, err);
     }
     return;
   }
 
-  // Already fully checked in/out for the day
-  console.log("Learner already completed all check-ins for today");
+  console.log(`[checkLearnerIn] ${learner.name} already completed all check-ins for today`);
 }

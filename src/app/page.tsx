@@ -52,6 +52,7 @@ export default function AttendancePage() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [programFilter, setProgramFilter] = useState<string | "all">("all");
+  const [attendanceFilter, setAttendanceFilter] = useState<"all" | "here" | "away" | "lunch" | "out" | "present" | "late" | "absent" | "jLate" | "jAbsent">("all");
   const [students, setStudents] = useState<RecordModel[]>([]);
 
   // Test mode: when enabled, can simulate different dates/times
@@ -82,7 +83,7 @@ export default function AttendancePage() {
 
   // Pagination
   const [page, setPage] = useState<number>(1);
-  const [perPage, setPerPage] = useState<number>(8);
+  const [perPage, setPerPage] = useState<number>(500);
   const [totalPages, setTotalPages] = useState<number>(1);
   const [totalItems, setTotalItems] = useState<number>(0);
 
@@ -93,6 +94,10 @@ export default function AttendancePage() {
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [commentEditValue, setCommentEditValue] = useState<string>("");
   const [isSavingComment, setIsSavingComment] = useState(false);
+
+  // Time editing state: tracks which learner+field is being edited
+  const [editingTimeKey, setEditingTimeKey] = useState<string | null>(null); // "learnerId:field"
+  const [timeEditValue, setTimeEditValue] = useState<string>("");
 
   // Preset times for quick testing
   const testTimePresets = [
@@ -165,7 +170,7 @@ export default function AttendancePage() {
     try {
       const result = await pbClient.listAttendance({
         date: viewDate,
-        perPage: 100,
+        perPage: 500,
       });
       const map: Record<string, any> = {};
       for (const record of result.items) {
@@ -211,13 +216,13 @@ export default function AttendancePage() {
         .collection("learners")
         .subscribe("*", () => {
           if (learnersTimer) clearTimeout(learnersTimer);
-          learnersTimer = setTimeout(fetchLearners, 500);
+          learnersTimer = setTimeout(fetchLearners, 1000);
         });
       unsubscribeAttendance = await pb
         .collection("attendance")
         .subscribe("*", () => {
           if (attendanceTimer) clearTimeout(attendanceTimer);
-          attendanceTimer = setTimeout(fetchAttendance, 500);
+          attendanceTimer = setTimeout(fetchAttendance, 1000);
         });
     })();
 
@@ -249,6 +254,32 @@ export default function AttendancePage() {
     return merged.sort((a, b) => a.name.localeCompare(b.name));
   }, [students, attendanceMap]);
 
+  // Classify a learner's presence state based on attendance data
+  const getPresenceState = useCallback((s: Student): "here" | "away" | "lunch" | "out" => {
+    if (s.time_out) return "out";
+    if (s.time_in) {
+      const events = s.lunch_events || [];
+      if (events.length > 0 && events[events.length - 1].type === "out") return "lunch";
+      return "here";
+    }
+    return "away";
+  }, []);
+
+  // Compute counts for each attendance filter category
+  const attendanceCounts = useMemo(() => {
+    const counts = { all: 0, here: 0, away: 0, lunch: 0, out: 0, present: 0, late: 0, absent: 0, jLate: 0, jAbsent: 0 };
+    for (const s of studentsWithAttendance) {
+      counts.all++;
+      counts[getPresenceState(s)]++;
+      if (s.status === "present") counts.present++;
+      else if (s.status === "late") counts.late++;
+      else if (s.status === "absent") counts.absent++;
+      else if (s.status === "jLate") counts.jLate++;
+      else if (s.status === "jAbsent") counts.jAbsent++;
+    }
+    return counts;
+  }, [studentsWithAttendance, getPresenceState]);
+
   // Update attendance field via direct PocketBase call
   const updateAttendance = useCallback(
     async (
@@ -257,29 +288,17 @@ export default function AttendancePage() {
       options?: { value?: string; timestamp?: string },
     ): Promise<{ wrote: boolean; value?: string; attendance?: any }> => {
       try {
-        const result = await pbClient.updateAttendance({
+        const fieldValue = options?.timestamp || options?.value || "";
+        const { attendance } = await pbClient.batchUpdateAttendance({
           learnerId,
-          field,
           date: viewDate,
-          value: options?.value,
-          timestamp: options?.timestamp,
+          fields: { [field]: fieldValue },
         });
-
-        if (result.status === "already_set") {
-          return {
-            wrote: false,
-            value: result.existingValue,
-            attendance: result.attendance,
-          };
-        }
-
-        // Refetch attendance data to sync
-        fetchAttendance();
 
         return {
           wrote: true,
-          value: result.value,
-          attendance: result.attendance,
+          value: fieldValue,
+          attendance,
         };
       } catch (err) {
         console.error("[updateAttendance] call failed", err);
@@ -294,20 +313,43 @@ export default function AttendancePage() {
       id: string,
       status: string,
       field: "status" | "lunch_status" = "status",
+      toggle: boolean = true,
     ) => {
-      // Optimistic update: immediately update local state
       const previousValue = attendanceMap[id]?.[field];
+      // Toggle off if clicking the already-active status (only when toggle=true, i.e. direct UI clicks)
+      const newValue = toggle && previousValue === status ? "" : status;
+
+      // Optimistic update
       setAttendanceMap((prev) => ({
         ...prev,
         [id]: {
           ...prev[id],
-          [field]: status,
+          [field]: newValue || null,
         },
       }));
 
       try {
-        await updateAttendance(id, field, { value: status });
-      } catch (err) {
+        await pbClient.batchUpdateAttendance({
+          learnerId: id,
+          date: viewDate,
+          fields: { [field]: newValue },
+        });
+      } catch (err: any) {
+        // Retry once on 429
+        if (err?.status === 429) {
+          console.log("[handleSetStatus] 429, retrying in 1s...");
+          await new Promise(r => setTimeout(r, 1000));
+          try {
+            await pbClient.batchUpdateAttendance({
+              learnerId: id,
+              date: viewDate,
+              fields: { [field]: newValue },
+            });
+            return;
+          } catch (retryErr) {
+            console.error("Retry failed:", retryErr);
+          }
+        }
         console.error("Failed to save status", err);
         // Revert on failure
         setAttendanceMap((prev) => ({
@@ -319,7 +361,7 @@ export default function AttendancePage() {
         }));
       }
     },
-    [updateAttendance, attendanceMap],
+    [viewDate, attendanceMap],
   );
 
   const handleCheckAction = useCallback(
@@ -391,7 +433,7 @@ export default function AttendancePage() {
           console.log(
             `[handleCheckAction] Check-in at ${now.toLocaleTimeString()}, lateTime: ${lateTime.toLocaleTimeString()}, isLate: ${isLate}, status: ${status}`,
           );
-          await handleSetStatus(id, status, "status");
+          await handleSetStatus(id, status, "status", false);
         } else if (action === "lunch-out" || action === "lunch-in") {
           if (!time_in) {
             console.log("[handleCheckAction] lunch action: must check in first");
@@ -428,12 +470,10 @@ export default function AttendancePage() {
           }));
           
           try {
-            await pbClient.updateAttendance({
+            await pbClient.batchUpdateAttendance({
               learnerId: id,
-              field: "lunch_events",
-              value: JSON.stringify(updatedEvents),
               date: viewDate,
-              force: true,
+              fields: { lunch_events: JSON.stringify(updatedEvents) },
             });
             
             // If checking in from lunch, update lunch_status
@@ -441,7 +481,7 @@ export default function AttendancePage() {
               const lunchLateTime = new Date(now);
               lunchLateTime.setHours(14, 1, 0, 0);
               const lunchStatus = now >= lunchLateTime ? "late" : "present";
-              await handleSetStatus(id, lunchStatus, "lunch_status");
+              await handleSetStatus(id, lunchStatus, "lunch_status", false);
               console.log(`[handleCheckAction] Lunch return at ${now.toLocaleTimeString()}, status: ${lunchStatus}`);
             } else {
               console.log(`[handleCheckAction] Lunch out at ${now.toLocaleTimeString()}`);
@@ -550,21 +590,72 @@ export default function AttendancePage() {
     [fetchAttendance, attendanceMap],
   );
 
+  // Save an edited time value
+  const handleTimeEdit = useCallback(
+    async (learnerId: string, field: "time_in" | "time_out", timeStr: string) => {
+      if (!timeStr) return;
+      // Build a full ISO timestamp from the time input (HH:MM) and the current view date
+      const [h, m] = timeStr.split(":").map(Number);
+      const d = new Date(`${viewDate}T00:00:00`);
+      d.setHours(h, m, 0, 0);
+      const timestamp = d.toISOString();
+
+      const previousValue = attendanceMap[learnerId]?.[field];
+      // Optimistic update
+      setAttendanceMap((prev) => ({
+        ...prev,
+        [learnerId]: {
+          ...prev[learnerId],
+          [field]: timestamp,
+        },
+      }));
+
+      try {
+        await pbClient.batchUpdateAttendance({
+          learnerId,
+          date: viewDate,
+          fields: { [field]: timestamp },
+        });
+      } catch (err) {
+        console.error("Failed to update time:", err);
+        setAttendanceMap((prev) => ({
+          ...prev,
+          [learnerId]: {
+            ...prev[learnerId],
+            [field]: previousValue,
+          },
+        }));
+      }
+      setEditingTimeKey(null);
+    },
+    [viewDate, attendanceMap],
+  );
+
   // Client-side filter for instant feedback while typing (before debounce triggers server fetch)
   // Uses studentsWithAttendance which merges learners with their attendance data
   const filtered = useMemo(() => {
-    // If search matches what server fetched, no need to filter again
-    if (search === debouncedSearch) return studentsWithAttendance;
-    // Otherwise, filter locally for instant feedback
     const filteredResults = studentsWithAttendance.filter((s) => {
-      const matchesName = s.name.toLowerCase().includes(search.toLowerCase());
-      const matchesProgram =
-        programFilter === "all" || s.program === programFilter;
-      return matchesName && matchesProgram;
+      // Name search (local instant filter when typing ahead of debounce)
+      if (search !== debouncedSearch) {
+        const matchesName = s.name.toLowerCase().includes(search.toLowerCase());
+        const matchesProgram =
+          programFilter === "all" || s.program === programFilter;
+        if (!matchesName || !matchesProgram) return false;
+      }
+      // Attendance presence / status filter
+      if (attendanceFilter !== "all") {
+        const statusFilters = ["present", "late", "absent", "jLate", "jAbsent"];
+        if (statusFilters.includes(attendanceFilter)) {
+          if (s.status !== attendanceFilter) return false;
+        } else {
+          if (getPresenceState(s) !== attendanceFilter) return false;
+        }
+      }
+      return true;
     });
     // Sort alphabetically by name
     return filteredResults.sort((a, b) => a.name.localeCompare(b.name));
-  }, [studentsWithAttendance, search, debouncedSearch, programFilter]);
+  }, [studentsWithAttendance, search, debouncedSearch, programFilter, attendanceFilter, getPresenceState]);
 
   // kid-friendly program colors
   const programColor = (program: string) =>
@@ -632,6 +723,10 @@ export default function AttendancePage() {
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search learners..."
                 className="outline-none text-sm bg-transparent flex-1"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
               />
               {search && (
                 <button
@@ -779,6 +874,72 @@ export default function AttendancePage() {
             </span>
           </div>
         )}
+
+        {/* Attendance filter pills */}
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          {([
+            { key: "all", label: "All", color: "gray" },
+            { key: "here", label: "Here", color: "green" },
+            { key: "away", label: "Away", color: "gray" },
+            { key: "lunch", label: "At Lunch", color: "orange" },
+            { key: "out", label: "Checked Out", color: "blue" },
+          ] as const).map(({ key, label, color }) => {
+            const isActive = attendanceFilter === key;
+            const colorStyles = {
+              gray: isActive ? "bg-gray-700 text-white" : "bg-gray-100 text-gray-700 hover:bg-gray-200",
+              green: isActive ? "bg-green-600 text-white" : "bg-green-50 text-green-700 border-green-200 hover:bg-green-100",
+              orange: isActive ? "bg-orange-500 text-white" : "bg-orange-50 text-orange-700 border-orange-200 hover:bg-orange-100",
+              blue: isActive ? "bg-blue-600 text-white" : "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100",
+            };
+            return (
+              <button
+                key={key}
+                onClick={() => setAttendanceFilter(key)}
+                className={`px-3 py-1.5 rounded-full text-sm font-medium cursor-pointer border transition-colors ${
+                  isActive ? `${colorStyles[color]} border-transparent` : `${colorStyles[color]}`
+                }`}
+              >
+                {label}{" "}
+                <span className={`${isActive ? "text-white/80" : "text-gray-400"}`}>
+                  {attendanceCounts[key]}
+                </span>
+              </button>
+            );
+          })}
+
+          <div className="w-px h-6 bg-gray-300 mx-1" />
+
+          {([
+            { key: "present", label: "Present", color: "green" },
+            { key: "late", label: "Late", color: "yellow" },
+            { key: "absent", label: "Absent", color: "red" },
+            { key: "jLate", label: "J. Late", color: "blue" },
+            { key: "jAbsent", label: "J. Absent", color: "purple" },
+          ] as const).map(({ key, label, color }) => {
+            const isActive = attendanceFilter === key;
+            const colorStyles = {
+              green: isActive ? "bg-green-600 text-white" : "bg-green-50 text-green-700 border-green-200 hover:bg-green-100",
+              yellow: isActive ? "bg-yellow-500 text-white" : "bg-yellow-50 text-yellow-700 border-yellow-200 hover:bg-yellow-100",
+              red: isActive ? "bg-red-600 text-white" : "bg-red-50 text-red-700 border-red-200 hover:bg-red-100",
+              blue: isActive ? "bg-blue-600 text-white" : "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100",
+              purple: isActive ? "bg-purple-600 text-white" : "bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100",
+            };
+            return (
+              <button
+                key={key}
+                onClick={() => setAttendanceFilter(key)}
+                className={`px-3 py-1.5 rounded-full text-sm font-medium cursor-pointer border transition-colors ${
+                  isActive ? `${colorStyles[color]} border-transparent` : `${colorStyles[color]}`
+                }`}
+              >
+                {label}{" "}
+                <span className={`${isActive ? "text-white/80" : "text-gray-400"}`}>
+                  {attendanceCounts[key]}
+                </span>
+              </button>
+            );
+          })}
+        </div>
 
         {/* Students grid or list */}
         {viewMode === "grid" ? (
@@ -957,18 +1118,48 @@ export default function AttendancePage() {
                   </div>
                   {/* Check-in */}
                   <div className="flex items-center gap-1 pl-3">
-                    <span
-                      className={`text-sm ${s.time_in ? "text-gray-900" : "text-gray-400"}`}
-                    >
-                      {formatTime(s.time_in)}
-                    </span>
-                    {!s.time_in && (
-                      <button
-                        onClick={() => handleCheckAction(s.id, "morning-in")}
-                        className="px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700 cursor-pointer hover:bg-green-200"
-                      >
-                        +
-                      </button>
+                    {editingTimeKey === `${s.id}:time_in` ? (
+                      <input
+                        type="time"
+                        value={timeEditValue}
+                        onChange={(e) => setTimeEditValue(e.target.value)}
+                        onBlur={() => {
+                          if (timeEditValue) handleTimeEdit(s.id, "time_in", timeEditValue);
+                          else setEditingTimeKey(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && timeEditValue) handleTimeEdit(s.id, "time_in", timeEditValue);
+                          if (e.key === "Escape") setEditingTimeKey(null);
+                        }}
+                        className="w-20 px-1 py-0.5 text-sm border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-400"
+                        autoFocus
+                      />
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => {
+                            setEditingTimeKey(`${s.id}:time_in`);
+                            if (s.time_in) {
+                              const d = new Date(s.time_in);
+                              setTimeEditValue(`${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`);
+                            } else {
+                              setTimeEditValue("");
+                            }
+                          }}
+                          className={`text-sm cursor-pointer hover:underline ${s.time_in ? "text-gray-900" : "text-gray-400"}`}
+                          title="Click to edit"
+                        >
+                          {formatTime(s.time_in)}
+                        </button>
+                        {!s.time_in && (
+                          <button
+                            onClick={() => handleCheckAction(s.id, "morning-in")}
+                            className="px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700 cursor-pointer hover:bg-green-200"
+                          >
+                            +
+                          </button>
+                        )}
+                      </>
                     )}
                   </div>
                   {/* Lunch (combined events display) */}
@@ -1035,18 +1226,48 @@ export default function AttendancePage() {
                   </div>
                   {/* Check-out */}
                   <div className="flex items-center gap-1">
-                    <span
-                      className={`text-sm ${s.time_out ? "text-gray-900" : "text-gray-400"}`}
-                    >
-                      {formatTime(s.time_out)}
-                    </span>
-                    {s.time_in && !s.time_out && (
-                      <button
-                        onClick={() => handleCheckAction(s.id, "day-out")}
-                        className="px-1.5 py-0.5 rounded text-xs bg-blue-100 text-blue-700 cursor-pointer hover:bg-blue-200"
-                      >
-                        +
-                      </button>
+                    {editingTimeKey === `${s.id}:time_out` ? (
+                      <input
+                        type="time"
+                        value={timeEditValue}
+                        onChange={(e) => setTimeEditValue(e.target.value)}
+                        onBlur={() => {
+                          if (timeEditValue) handleTimeEdit(s.id, "time_out", timeEditValue);
+                          else setEditingTimeKey(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && timeEditValue) handleTimeEdit(s.id, "time_out", timeEditValue);
+                          if (e.key === "Escape") setEditingTimeKey(null);
+                        }}
+                        className="w-20 px-1 py-0.5 text-sm border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-400"
+                        autoFocus
+                      />
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => {
+                            setEditingTimeKey(`${s.id}:time_out`);
+                            if (s.time_out) {
+                              const d = new Date(s.time_out);
+                              setTimeEditValue(`${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`);
+                            } else {
+                              setTimeEditValue("");
+                            }
+                          }}
+                          className={`text-sm cursor-pointer hover:underline ${s.time_out ? "text-gray-900" : "text-gray-400"}`}
+                          title="Click to edit"
+                        >
+                          {formatTime(s.time_out)}
+                        </button>
+                        {s.time_in && !s.time_out && (
+                          <button
+                            onClick={() => handleCheckAction(s.id, "day-out")}
+                            className="px-1.5 py-0.5 rounded text-xs bg-blue-100 text-blue-700 cursor-pointer hover:bg-blue-200"
+                          >
+                            +
+                          </button>
+                        )}
+                      </>
                     )}
                   </div>
                   {/* Comments */}
@@ -1204,6 +1425,7 @@ export default function AttendancePage() {
                 <option value={8}>8</option>
                 <option value={12}>12</option>
                 <option value={24}>24</option>
+                <option value={500}>All</option>
               </select>
             </div>
           </div>
